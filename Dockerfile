@@ -51,5 +51,8 @@ ENV HOME=/home/user \
 # Expose port 7860 for the Gradio application
 EXPOSE 7860
 
+# Pre-run app.py in headless mode
+RUN python3 app.py --headless
+
 # Specify the command to run your Gradio app
 CMD ["python3", "app.py"]
