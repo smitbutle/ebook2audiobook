@@ -80,6 +80,9 @@ parser.add_argument("--top_p", type=float, default=0.8, help="Top-p sampling. Lo
 parser.add_argument("--speed", type=float, default=1.0, help="Speed factor for the speech generation. IE: How fast the Narrerator will speak. Defaults to 1.0.")
 parser.add_argument("--enable_text_splitting", type=bool, default=False, help="Enable splitting text into sentences. Defaults to True.")
 
+parser.add_argument("--batch", type=bool, default=False, help="Batch mode")
+parser.add_argument("--start_chapter", type=int, default=0, help="Start chapter")
+parser.add_argument("--end_chapter", type=int, default=0, help="End chapter")
 args = parser.parse_args()
 
 
@@ -327,6 +330,7 @@ from bs4 import BeautifulSoup
 import re
 import csv
 import nltk
+import re
 
 # Only run the main script if Value is True
 def create_chapter_labeled_book(ebook_file_path):
@@ -376,6 +380,11 @@ def create_chapter_labeled_book(ebook_file_path):
                         # Create a new chapter file and increment the counter
                         previous_filename = os.path.join(directory, f"chapter_{chapter_counter}.txt")
                         chapter_counter += 1
+                        text = text.lstrip('\n')  # Remove leading newline characters
+                        text = re.sub(r'\n{2,}', '\n', text)
+                        if '\n' in text:
+                            text = re.sub(r'\n', r'.\n', text, count=1)     
+                        print(text)
                         with open(previous_filename, 'w', encoding='utf-8') as file:
                             file.write(text)
                             print(f"Saved chapter: {previous_filename}")
@@ -660,12 +669,101 @@ def convert_chapters_to_audio_custom_model(chapters_dir, output_audio_dir, tempe
 
 
 
-def convert_chapters_to_audio_standard_model(chapters_dir, output_audio_dir, temperature, length_penalty, repetition_penalty, top_k, top_p, speed, enable_text_splitting, target_voice_path=None, language="en"):
+import pysrt
+
+def convert_srt_to_ass(srt_path, ass_path, font="Roboto Medium", font_size=18):
+    """
+    Converts an SRT subtitle file to an ASS subtitle file with custom styles.
+
+    Args:
+        srt_path (str): Path to the input SRT file.
+        ass_path (str): Path to the output ASS file.
+        font (str): Font to use for the ASS subtitles (default: Roboto Medium).
+        font_size (int): Font size for the ASS subtitles (default: 18).
+
+    Returns:
+        None
+    """
+    # Read the SRT file using pysrt
+    subs = pysrt.open(srt_path)
+
+    # Create the ASS file header
+    ass_header = f"""[Script Info]
+Title: Converted Subtitles
+ScriptType: v4.00+
+Collisions: Normal
+PlayDepth: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default, {font}, {font_size}, &H00FFFFFF, &H000000FF, &H00222222, &H00000000, 0, 0, 0, 0, 100, 100, 0, 0, 1, 2, 2, 2, 10, 10, 20, 1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+    # Generate the ASS events section
+    ass_events = []
+    for sub in subs:
+        start_time = sub.start.to_time()  # Convert start time
+        end_time = sub.end.to_time()      # Convert end time
+
+        # Format time as H:MM:SS.cc
+        start = f"{start_time.hour}:{start_time.minute:02}:{start_time.second:02}.{start_time.microsecond // 10000:02}"
+        end = f"{end_time.hour}:{end_time.minute:02}:{end_time.second:02}.{end_time.microsecond // 10000:02}"
+
+        # Add the dialogue line
+        ass_events.append(
+            f"Dialogue: 0,{start},{end},Default,,0,0,0,,{sub.text.replace('\n', '\\N')}"
+        )
+
+    # Write the ASS file
+    with open(ass_path, "w", encoding="utf-8") as ass_file:
+        ass_file.write(ass_header)
+        ass_file.write("\n".join(ass_events))
+
+    print(f"SRT converted to ASS and saved at {ass_path}")
+
+
+
+def format_time(seconds):
+    """Convert seconds to SRT timestamp format hh:mm:ss,ms."""
+    milliseconds = int((seconds - int(seconds)) * 1000)
+    seconds = int(seconds)
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours:02}:{minutes:02}:{seconds:02},{milliseconds:03}"
+
+
+
+def save_as_srt(subtitle_entries, output_path):
+    """Save subtitles to an SRT file."""
+    with open(output_path, 'w', encoding='utf-8') as file:
+        for i, entry in enumerate(subtitle_entries):
+            file.write(f"{i + 1}\n")
+            file.write(f"{entry['start']} --> {entry['end']}\n")
+            file.write(f"{entry['text']}\n\n")
+
+
+
+def get_audio_duration(audio_file_path):
+    """Get the duration of an audio file in seconds."""
+    import wave
+    with wave.open(audio_file_path, 'r') as wav_file:
+        frames = wav_file.getnframes()
+        rate = wav_file.getframerate()
+        return frames / float(rate)
+
+
+
+def convert_chapters_to_audio_standard_model(chapters_dir, output_audio_dir, temperature, length_penalty, repetition_penalty, top_k, top_p, speed, enable_text_splitting, ebook_file_path, target_voice_path=None, language="en"):
     selected_tts_model = "tts_models/multilingual/multi-dataset/xtts_v2"
     tts = TTS(selected_tts_model, progress_bar=False).to(device)
 
     if not os.path.exists(output_audio_dir):
         os.makedirs(output_audio_dir)
+    if not os.path.exists("subtitles"):
+        os.makedirs("subtitles")
 
     for chapter_file in sorted(os.listdir(chapters_dir)):
         if chapter_file.endswith('.txt'):
@@ -679,9 +777,15 @@ def convert_chapters_to_audio_standard_model(chapters_dir, output_audio_dir, tem
             chapter_path = os.path.join(chapters_dir, chapter_file)
             output_file_name = f"audio_chapter_{chapter_num}.wav"
             output_file_path = os.path.join(output_audio_dir, output_file_name)
+            output_srt_file_name = f"subtitles_{ebook_file_path[13:-5]}.srt"
+            output_ass_file_name = f"subtitles_{ebook_file_path[13:-5]}.ass"
+            output_srt_file_path = os.path.join("subtitles", output_srt_file_name)
+            output_ass_file_path = os.path.join("subtitles", output_ass_file_name)
             temp_audio_directory = os.path.join(".", "Working_files", "temp")
             os.makedirs(temp_audio_directory, exist_ok=True)
             temp_count = 0
+            subtitle_entries = []  # To store subtitle data
+            current_time = 0.0 
 
             with open(chapter_path, 'r', encoding='utf-8') as file:
                 chapter_text = file.read()
@@ -694,10 +798,15 @@ def convert_chapters_to_audio_standard_model(chapters_dir, output_audio_dir, tem
                     # If the language is not supported, handle it (e.g., return the text unchanged)
                     sentences = [chapter_text]  # No tokenization, just wrap the text in a list
                 #sentences = sent_tokenize(chapter_text, language='italian' if language == 'it' else 'english')
+                title_processed = False
                 for sentence in tqdm(sentences, desc=f"Chapter {chapter_num}"):
                     fragments = split_long_sentence(sentence, language=language)
                     for fragment in fragments:
                         if fragment != "":
+                            if not title_processed:
+                                fragment = fragment[:-1]
+                                title_processed = True
+                            fragment_start_time = current_time
                             print(f"Generating fragment: {fragment}...")
                             fragment_file_path = os.path.join(temp_audio_directory, f"{temp_count}.wav")
                             speaker_wav_path = target_voice_path if target_voice_path else default_target_voice_path
@@ -714,10 +823,19 @@ def convert_chapters_to_audio_standard_model(chapters_dir, output_audio_dir, tem
                                 speed=speed, 
                                 enable_text_splitting=enable_text_splitting
                             )
-
+                            duration = get_audio_duration(fragment_file_path)  # Implement this or use a library
+                            fragment_end_time = fragment_start_time + duration
+                            subtitle_entries.append({
+                                'start': format_time(fragment_start_time),
+                                'end': format_time(fragment_end_time),
+                                'text': fragment
+                            })
+                            current_time = fragment_end_time
                             temp_count += 1
 
             combine_wav_files(temp_audio_directory, output_audio_dir, output_file_name)
+            save_as_srt(subtitle_entries, output_srt_file_path)
+            convert_srt_to_ass(output_srt_file_path, output_ass_file_path)
             wipe_folder(temp_audio_directory)
             print(f"Converted chapter {chapter_num} to audio.")
 
@@ -798,7 +916,7 @@ def convert_ebook_to_audio(ebook_file, target_voice_file, language, use_custom_m
     if use_custom_model:
         convert_chapters_to_audio_custom_model(chapters_directory, output_audio_directory, temperature, length_penalty, repetition_penalty, top_k, top_p, speed, enable_text_splitting, target_voice, language, custom_model)
     else:
-        convert_chapters_to_audio_standard_model(chapters_directory, output_audio_directory, temperature, length_penalty, repetition_penalty, top_k, top_p, speed, enable_text_splitting, target_voice, language)
+        convert_chapters_to_audio_standard_model(chapters_directory, output_audio_directory, temperature, length_penalty, repetition_penalty, top_k, top_p, speed, enable_text_splitting, ebook_file_path, target_voice, language)
     
     try:
         progress(0.9, desc="Creating M4B from chapters")
@@ -999,7 +1117,7 @@ def run_gradio_interface():
 
 
 # Check if running in headless mode
-if args.headless:
+if args.headless and not args.batch:
     # If the arg.custom_model_url exists then use it as the custom_model_url lol
     custom_model_url = args.custom_model_url if args.custom_model_url else None
     
@@ -1035,6 +1153,64 @@ if args.headless:
     # Example headless execution
     convert_ebook_to_audio(ebook_file_path, target_voice, args.language, args.use_custom_model, args.custom_model, args.custom_config, args.custom_vocab, args.temperature, args.length_penalty, args.repetition_penalty, args.top_k, args.top_p, args.speed, args.enable_text_splitting, custom_model_url)
 
+
+
+def burn_subtitles(video_path, subtitle_path, output_path, audio_file):
+    """
+    Burn subtitles into a video using FFmpeg.
+
+    Args:
+        video_path (str): Path to the input video.
+        subtitle_path (str): Path to the subtitles file (e.g., .srt).
+        output_path (str): Path to the output video file.
+
+    Returns:
+        None
+    """
+    try:
+        command = [
+            "ffmpeg",
+            "-stream_loop", "-1",               # Loop the input video infinitely
+            "-i", "temp_vid_30sec.mp4",         # Input looping video
+            "-i", audio_file,                   # Input audio file
+            "-filter_complex", f"[0:v]scale=1920:1080[v0];[v0]subtitles={subtitle_path}[vout]",  # Scale video and add subtitles
+            "-map", "[vout]",                   # Use the processed video stream
+            "-map", "1:a",                      # Use the audio stream from the second input
+            "-c:v", "h264_nvenc",               # Video codec
+            "-preset", "p7",                    # Encoding speed preset
+            "-b:v", "5M",                       # Video bitrate
+            "-c:a", "aac",                      # Audio codec
+            "-shortest",                        # Stop when the shortest stream ends
+            output_path                         # Output file
+        ]
+
+        # Run FFmpeg command
+        subprocess.run(command, check=True)
+        print(f"Subtitles burned successfully into {output_path}")
+    except subprocess.CalledProcessError as e:
+        print("Error during FFmpeg execution:", e)
+
+
+if args.headless and args.batch:
+    custom_model_url = args.custom_model_url if args.custom_model_url else None
+    target_voice = args.voice if args.voice else None
+    custom_model = None
+
+    start_chapter = args.start_chapter
+    end_chapter = args.end_chapter
+
+    for i in range(start_chapter, end_chapter+1):
+
+        audio_file = f"Audiobooks/chapter_{i}.m4b"
+        video_file = f"Audiobooks/chapter_{i}.mp4"
+        subtitle_file = f"subtitles/subtitles_chapter_{i}.ass"
+        output_file = f"ready_to_upload/chapter_{i}.mp4"
+        ebook_file_path = f"output_epubs/chapter_{i}.epub"
+        args.ebook = ebook_file_path
+        convert_ebook_to_audio(ebook_file_path, target_voice, args.language, args.use_custom_model, args.custom_model, args.custom_config, args.custom_vocab, args.temperature, args.length_penalty, args.repetition_penalty, args.top_k, args.top_p, args.speed, args.enable_text_splitting, custom_model_url)
+        burn_subtitles(video_file, subtitle_file, output_file, audio_file)
+
+    
 
 else:
     # Launch Gradio UI

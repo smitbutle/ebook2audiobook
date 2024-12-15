@@ -1,0 +1,9 @@
+env/
+data/*
+output_epubs/*
+subtitles/
+Audiobooks/
+Chapter_wav_files/
+ready_to_upload/
+Working_files/
+temp*
